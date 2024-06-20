@@ -1,0 +1,2 @@
+DEVICE /dev/sda1
+ARRAY /dev/md0 devices=/dev/sda1

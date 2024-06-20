@@ -1,0 +1,435 @@
+#!/bin/sh
+
+if [ -f "/usr/bin/ledcnt_app" ];then
+	/usr/bin/ledcnt_app 5
+fi
+
+COMPARE_STRING="echo \"****** begin goo system ******\""
+MNT_HDD_A="/NK1000/Data/MODUL"
+MNT_HDD_B="/NK2000/Data/MODUL"
+HDD_A_NODE="NONE"
+HDD_B_NODE="NONE"
+HDD_C_NODE="NONE"
+START_DIR="NONE"
+RAID_FIRST="N"
+
+# rescure HDD : 2010.2.9 : lines 9
+HDD_A_EXIST="N"
+HDD_B_EXIST="N"
+START_TIME=0
+END_TIME=0
+ELAPSED_TIME=0
+GET_UPTIME()
+{
+	return $(cat /proc/uptime | cut -d " " -f1 | cut -d . -f1)
+}
+
+
+BACKUP_BLOCKS="8193 24577 40961 57345 73729"
+MOUNT_CMD()
+{
+	# rescure HDD : 2010.2.9 : lines 2
+	GET_UPTIME
+	START_TIME=$?
+	
+	if [ -f "/usr/bin/safemount" ];then
+		safemount /dev/$1 $2 ext3
+	else
+		mount -t auto -o noatime /dev/$1 $2
+		for BLK in $(echo $BACKUP_BLOCKS)
+		do
+			if [ $(cat /etc/mtab | grep "/dev/$1 $2" | wc -l) -eq 0 ];then
+				echo "[SH] Mount Failed. Try With Backup Superblock <$BLK>"
+				mount -t auto -o sb=$BLK,noatime /dev/$1 $2
+			fi
+		done
+	fi
+
+	# rescure HDD : 2010.2.9 : lines 23
+	GET_UPTIME
+	END_TIME=$?
+	ELAPSED_TIME=$(($END_TIME - $START_TIME))
+	echo "mount elapsed time = $ELAPSED_TIME"
+	if [ "$1" != "md" ] && [ $ELAPSED_TIME -gt 20 ];then
+		if [ "$2" == "/NK1000" ];then
+			/usr/bin/flash_control set A
+		elif [ "$2" == "/NK2000" ];then
+			/usr/bin/flash_control set B
+		fi
+	elif [ "$1" != "md" ] && [ $ELAPSED_TIME -gt 10 ];then
+		/usr/bin/flash_control err A
+		RESULT=$?
+		if [ "$2" == "/NK1000" ] && [ "$RESULT" -eq 1 ];then
+			/usr/bin/flash_control set A
+		fi
+	
+		/usr/bin/flash_control err B
+		RESULT=$?
+		if [ "$2" == "/NK2000" ] && [ "$RESULT" -eq 1 ];then
+			/usr/bin/flash_control set B
+		fi
+	fi
+
+	
+	if [ $(cat /etc/mtab | grep "/dev/$1 $2" | wc -l) -eq 1 ];then
+		return 0
+	else
+		return 1
+	fi
+}
+
+CHK_SCRIPT()
+{
+	if [ "$1" -eq 0 ];then
+		if [ -f "$2/module.sh" ];then
+			if [ "$COMPARE_STRING" == "$(head -1 $2/module.sh)" ];then
+				START_DIR=$2
+			else
+				echo "[SH] $2/module.sh Is Invalid < Not Match >"
+			fi
+		else
+			echo "[SH] $2/module.sh is NOT Exist !"
+		fi
+	else
+		echo "[SH] Mount Failed : $3"
+	fi
+}
+
+CHK_RAID_FIRST()
+{
+	if [ $(tune2fs -l /dev/sdb1|grep "Block count"|grep 104388|wc -l) -eq 1 ];then
+		RAID_FIRST="Y"
+	elif [ $(tune2fs -l /dev/sdb1|grep "Block count"|grep 251007|wc -l) -eq 1 ];then
+		RAID_FIRST="Y"	
+	else
+		RAID_FIRST="N"
+	fi
+}
+
+RAID_INIT()
+{
+	echo "[SH] RAID INIT...."
+	if [ "$2" != "" ];then
+		mdadm -C /dev/md0 --level=raid1 --raid-devices=2 /dev/sdb1 /dev/sda1 --run --force
+	else
+		mdadm -C /dev/md0 --level=raid1 --raid-devices=1 $1 --run --force
+	fi
+	mdadm --misc --wait /dev/md0
+}
+RAID_BIND()
+{
+	echo "[SH] RAID BIND...."
+	if [ "$2" != "" ];then
+		mdadm -A /dev/md0 $1 $2 --run
+	else
+		mdadm -A /dev/md0 $1 --force --run
+	fi
+	mdadm --misc --wait /dev/md0
+}
+RAID_ADD()
+{
+	if [ $(cat /proc/mdstat | fgrep "UU" | wc -l) -eq 1 ];then
+		return 0
+	fi
+
+	echo "[SH] RAID ADD DEVICE...."
+	if [ $(cat /proc/mdstat | fgrep "_U" | wc -l) -eq 1 ];then
+		mdadm --manage /dev/md0 --add /dev/sdb1
+	elif [ $(cat /proc/mdstat | fgrep "U_" | wc -l) -eq 1 ];then
+		mdadm --manage /dev/md0 --add /dev/sda1
+	fi
+	mdadm --misc --wait /dev/md0
+}
+COPY_LIB()
+{
+	# check copy
+	if [ -f "/NK2000/Data/MODUL/copy_complete" ];then
+		echo "[SH] Copy Check: No need...."
+		return 0
+	else
+		echo "[SH] Copy Check: Start Copy...."
+	fi
+	
+	mkdir -p /src3
+	mkdir -p /src4
+	echo "[SH] Try Mount Target Device...."
+
+	if [ "$HDD_A_NODE" != "NONE" ] && [ "$HDD_B_NODE" != "NONE" ];then
+		if [ $(fdisk -l|grep sdb3|wc -l) -eq 1 ];then
+			mount -t auto -o rw /dev/sdb3 /src3
+		fi
+		if [ $(fdisk -l|grep sdb4|wc -l) -eq 1 ];then
+			mount -t auto -o rw /dev/sdb4 /src4
+		fi
+	else
+		if [ $(fdisk -l|grep sda3|wc -l) -eq 1 ];then
+			mount -t auto -o rw /dev/sda3 /src3
+		fi
+		if [ $(fdisk -l|grep sda4|wc -l) -eq 1 ];then
+			mount -t auto -o rw /dev/sda4 /src4
+		fi		
+	fi
+
+	mkdir -p /NK2000/Data/MODUL
+	mkdir -p /NK2000/Data/lib
+	
+	echo "[SH] Copy Modules...."
+	if [ -f "/src3/Data/MODUL/module.sh" ];then
+		cp -Rf /src3/Data/MODUL/* /NK2000/Data/MODUL/
+	else
+		cp -Rf /src4/Data/MODUL/* /NK2000/Data/MODUL/
+	fi
+	RESULT_COPY_LIB=$?
+
+	echo "[SH] Copy Libraries...."
+	if [ -f "/src3/Data/lib/libGooSystem.so" ];then
+		cp -Rf /src3/Data/lib/* /NK2000/Data/lib/
+	else
+		cp -Rf /src4/Data/lib/* /NK2000/Data/lib/
+	fi
+	RESULT_COPY_MODUL=$?
+
+	if [ "$RESULT_COPY_LIB" -ne 0 ] || [ "$RESULT_COPY_LIB" -ne 0 ];then
+		echo "[SH] Copy Failure...."
+	else
+		sync
+		sleep 1
+		echo "OK" > /NK2000/Data/MODUL/copy_complete
+		sync
+		echo "[SH] Copy Complete...."
+		rm -f /src3/Data/115/.115.*
+		rm -f /src4/Data/115/.115.*
+		echo "[SH] Force Update XG1000 System Program...."
+		sync
+	fi
+	umount /src3
+	umount /src4
+	rm -rf /src3
+	rm -rf /src4
+	return 1;
+}
+RAID_TO_ZERO()
+{
+	if [ $(mdadm --examine $1 | grep a92b4efc | wc -l) -eq 1 ];then
+		mdadm --misc --zero-superblock $1
+		echo "[SH] $1 : Delete Raid Superblock..."
+	fi
+}
+
+# Make link for PATA/SATA CDROM
+if [ -d "/sys/block/sr0" ] ; then
+	ln -s /dev/sr0 /dev/cdrom
+else
+	ln -s /dev/hda /dev/cdrom
+fi
+
+############################## SATA Disk ##############################
+echo "[SH] Try SATA HDD Boot...."
+
+for HDDNODE in $(ls -1 /sys/block/ | grep "sd")
+do
+	if [ $(ls -l /sys/block/$HDDNODE/ | grep /devices/pci | grep "0:0:0:0" | wc -l) -eq 1 ];then
+		if [ "$(/usr/bin/hdd_smart /dev/$HDDNODE)" == "NG" ];then
+			echo -n "A" >> /tmp/smart_error
+		else
+			# rescure HDD : 2010.2.9 : lines 6
+			/usr/bin/flash_control chk A
+			RESULT=$?
+			if [ "$RESULT" -eq 1 ];then
+				echo "[SH] HDD-A was disabled. system partition mount aborted !"
+			else
+				/usr/bin/flash_control reset A
+				HDD_A_NODE=$HDDNODE;
+			# rescure HDD : 2010.2.9 : lines 1
+			fi
+		fi
+		# rescure HDD : 2010.2.9 : lines 1
+		HDD_A_EXIST="Y"
+		check_disktype /dev/$HDDNODE A
+	elif [ $(ls -l /sys/block/$HDDNODE/ | grep /devices/pci | grep "1:0:0:0" | wc -l) -eq 1 ];then
+		if [ "$(/usr/bin/hdd_smart /dev/$HDDNODE)" == "NG" ];then
+			echo -n "B" >> /tmp/smart_error
+		else
+			# rescure HDD : 2010.2.9 : lines 11
+			/usr/bin/flash_control chk B
+			RESULT=$?
+			if [ "$RESULT" -eq 1 ];then
+				if [ "$HDD_A_NODE" != "NONE" ];then
+					echo "[SH] HDD-B was disabled. system partition mount aborted !"
+				else
+					echo "[SH] both HDDs were disabled. but HDD-B is enabled for start system !"
+					HDD_B_NODE=$HDDNODE;
+				fi
+			else
+				/usr/bin/flash_control reset B
+				HDD_B_NODE=$HDDNODE;
+			# rescure HDD : 2010.2.9 : lines 1
+			fi
+		fi
+		# rescure HDD : 2010.2.9 : lines 1
+		HDD_B_EXIST="Y"
+		check_disktype /dev/$HDDNODE B
+	fi
+done
+
+############## RESET FLASH for no-connect HDD Slot ################
+# rescure HDD : 2010.2.9 : lines 6
+if [ "$HDD_A_EXIST" == "N" ];then
+	/usr/bin/flash_control reset A
+fi
+if [ "$HDD_B_EXIST" == "N" ];then
+	/usr/bin/flash_control reset B
+fi
+
+if [ $(fdisk -l|grep sda4|wc -l) -eq 1 ] && [ $(fdisk -l|grep sdb4|wc -l) -eq 1 ];then
+	########################## RAID MOUNT #########################
+	# check first raid
+	CHK_RAID_FIRST
+	
+	#mdadm --examine /dev/sda1
+	#mdadm --examine /dev/sdb1
+	
+	if [ "$HDD_B_NODE" != "NONE" ] && [ "$HDD_A_NODE" != "NONE" ];then
+
+		################ HDD A + HDD B 
+		
+		# raid1 (bind)
+		RAID_BIND /dev/sdb1 /dev/sda1
+		
+		# check raid
+		if [ $(mdadm --query /dev/md0 | grep raid1 | wc -l) -eq 0 ];then
+			RAID_INIT /dev/sdb1 /dev/sda1
+		fi
+		
+		# check number of devices
+		RAID_ADD
+	else
+		################ HDD A or B (sda) Only 
+		# raid1 (bind)
+		if [ "$HDD_A_NODE" == "NONE" ];then
+			echo "[SH] BIND without HDD-A"
+			RAID_BIND /dev/sdb1
+			#check raid
+			if [ $(mdadm --query /dev/md0 | grep raid1 | wc -l) -eq 0 ];then
+				RAID_INIT /dev/sdb1
+			fi
+		else
+			RAID_BIND /dev/sda1
+			#check raid
+			if [ $(mdadm --query /dev/md0 | grep raid1 | wc -l) -eq 0 ];then
+				RAID_INIT /dev/sda1
+			fi
+		fi
+	fi
+
+	################# COMMON 
+	if [ $(mdadm --query /dev/md0 | grep raid1 | wc -l) -eq 1 ];then
+		#print md0
+		tune2fs -l /dev/md0 > /dev/null
+		TUNE_RESULT=$?
+		echo "[SH] TUNE2FS RESULT CODE: $TUNE_RESULT"
+		echo "[SH] FIRST RAID: $RAID_FIRST"
+		# exec mkfs.ext3 if this is first raid creation
+		if [ "$RAID_FIRST" == "Y" ] || [ "$TUNE_RESULT" -ne 0 ];then
+			#format
+			mkfs.ext3 -i32768 /dev/md0
+		fi
+
+		#mount
+		MOUNT_CMD md0 /NK2000
+		RESULT=$?
+		if [ "$RESULT" -eq 0 ];then
+			#copy check
+			COPY_LIB
+			
+			#check script in /NK2000
+			CHK_SCRIPT $RESULT $MNT_HDD_B /NK2000
+		fi
+	else
+		# cannot find raid partition : /dev/md0
+		
+		if [ "$HDD_B_NODE" != "NONE" ];then
+		
+			#delete raid superblock
+			RAID_TO_ZERO /dev/$HDD_B_NODE"1"
+			
+			#mount	
+			MOUNT_CMD $HDD_B_NODE"1" /NK2000
+			RESULT=$?
+			
+			#check script in /NK2000
+			CHK_SCRIPT $RESULT $MNT_HDD_B /NK2000
+		fi
+		
+		if [ "$HDD_A_NODE" != "NONE" ];then
+		
+			#delete raid superblock
+			RAID_TO_ZERO /dev/$HDD_A_NODE"1"
+						
+			#mount
+			MOUNT_CMD $HDD_A_NODE"1" /NK1000
+			RESULT=$?
+			
+			#check script in /NK1000
+			if [ "$START_DIR" == "NONE" ];then
+				CHK_SCRIPT $RESULT $MNT_HDD_A /NK1000
+			fi
+		fi
+	
+	fi
+
+else
+	########################## NORMAL MOUNT ##########################
+
+	if [ "$HDD_B_NODE" != "NONE" ];then
+	
+		#delete raid superblock
+		RAID_TO_ZERO /dev/$HDD_B_NODE"1"
+				
+		#mount	
+		MOUNT_CMD $HDD_B_NODE"1" /NK2000
+		RESULT=$?
+		
+		#check script in /NK2000
+		CHK_SCRIPT $RESULT $MNT_HDD_B /NK2000
+	fi
+	
+	if [ "$HDD_A_NODE" != "NONE" ];then
+	
+		#delete raid superblock
+		RAID_TO_ZERO /dev/$HDD_A_NODE"1"
+					
+		#mount
+		MOUNT_CMD $HDD_A_NODE"1" /NK1000
+		RESULT=$?
+		
+		#check script in /NK1000
+		if [ "$START_DIR" == "NONE" ];then
+			CHK_SCRIPT $RESULT $MNT_HDD_A /NK1000
+		fi
+	fi
+fi
+############################## PATA Disk ##############################
+if [ "$START_DIR" == "NONE" ];then
+	if [ $(fdisk -l /dev/sda | wc -l) -eq 0 ] && [ $(fdisk -l /dev/sdb | wc -l) -eq 0 ];then
+		echo "[SH] Try PATA HDD Boot...."
+		if [ $(fdisk -l /dev/hda | grep hda1 | wc -l) -gt 0 ];then
+			mount -t auto -o noatime /dev/hda1 /NK1000
+			START_DIR=$MNT_HDD_A	
+		fi
+	fi
+fi
+
+
+######################### Start Script start ##########################
+if [ "$START_DIR" == "NONE" ];then
+	echo "[SH] MOUNT FAILED - cannot found bootable hard disk"
+else
+	echo "[SH] START LOCATION : $START_DIR"
+	cd $START_DIR
+	
+	# execute module.sh
+	./module.sh
+fi
+
+exit 0
